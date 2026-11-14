@@ -1,385 +1,263 @@
-package org.n0.speedy_launch;
+package org.n0.speedy_launch
 
-import android.app.Activity;
-import android.app.AlertDialog;
-import android.content.Intent;
-import android.content.SharedPreferences;
-import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
-import android.graphics.Color;
-import android.net.Uri;
-import android.os.Bundle;
-import android.preference.PreferenceManager;
-import android.provider.Settings;
-import android.text.Editable;
-import android.text.TextWatcher;
-import android.view.WindowManager;
-import android.view.inputmethod.InputMethodManager;
-import android.widget.ArrayAdapter;
-import android.widget.Button;
-import android.widget.EditText;
-import android.widget.ListView;
-import android.content.Context;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Locale;
-import java.util.stream.Collectors;
+import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
+import android.widget.BaseAdapter
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.TextView
+import java.text.Collator
+import java.util.LinkedHashMap
+import java.util.Locale
+import java.util.concurrent.Executors
 
-public class MainActivity extends Activity {
+/** A small, icon-free HOME activity. It has no service, polling loop, or third-party UI code. */
+class LauncherActivity : Activity() {
+    private val worker = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val apps = ArrayList<LauncherApp>()
+    private lateinit var appAdapter: AppAdapter
+    private lateinit var searchField: EditText
+    private lateinit var appList: ListView
+    private var query = ""
+    private var receiverRegistered = false
+    private var pendingRefresh: Runnable? = null
 
-    SharedPreferences prefs;
-    SharedPreferences.Editor prefEditor;
+    private val packageChanges = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            scheduleRefresh()
+        }
+    }
 
-    ListView appListView;
-    ListView leftPrefsListView;
-    ListView rightPrefsListView;
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
+        window.statusBarColor = Color.rgb(16, 16, 16)
+        window.navigationBarColor = Color.rgb(16, 16, 16)
+        setContentView(createContentView())
+        refreshApps()
+    }
 
-    EditText searchKeyEdit;
-
-    Button leftBtn1;
-    Button leftBtn2;
-    Button rightBtn1;
-    Button rightBtn2;
-    AlertDialog.Builder alertDialogBuilder;
-
-    private ArrayList<String> packageNamesArrList;
-    private ArrayAdapter<String> appAdapter;
-    private List<String[]> packageList;
-    private PackageManager packageManager;
-
-
-    /* the global search string */
-    private String searchString;
-
-    private boolean tempShowApp = false;
-
-    final private String[] leftPrefsArr = new String[]{"∫", "∃", "∈", "∉", "⊂", "⊗", "∀"};
-    final private String[] rightPrefsArr = new String[]{"∞", "∧", "∨", "⊂", "∑", "∏", "⊕"};
-
-
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-
-        super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_main);
-        getWindow().setStatusBarColor(Color.TRANSPARENT);
-        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
-
-        /* Get UI Elements */
-        appListView = findViewById(R.id.appListView);
-        searchKeyEdit = findViewById(R.id.searchKeyEdit);
-        leftBtn1 = findViewById(R.id.leftBtn1);
-        leftBtn2 = findViewById(R.id.leftBtn2);
-        rightBtn1 = findViewById(R.id.rightBtn1);
-        rightBtn2 = findViewById(R.id.rightBtn2);
-        leftPrefsListView = findViewById(R.id.leftPrefs);
-        rightPrefsListView = findViewById(R.id.rightPrefs);
-        alertDialogBuilder = new AlertDialog.Builder(this);
-
-        /* get the system package manager */
-        packageManager = getPackageManager();
-
-        /* array list for storing the package names */
-        packageNamesArrList = new ArrayList<>();
-
-        /* array adapter which will be used to populate the main list */
-        appAdapter = new ArrayAdapter<>(this, R.layout.main_listview, R.id.mnTxtVw, new ArrayList<>());
-
-        ArrayAdapter<String> leftPrefsAdapter = new ArrayAdapter<>(this, R.layout.main_listview, R.id.mnTxtVw, rightPrefsArr);
-        ArrayAdapter<String> rightPrefsAdapter = new ArrayAdapter<>(this, R.layout.main_listview, R.id.mnTxtVw, leftPrefsArr);
-
-
-        leftPrefsListView.setAdapter(leftPrefsAdapter);
-        rightPrefsListView.setAdapter(rightPrefsAdapter);
-
-        searchString = "";
-        /* get all the package names into the list */
-        updateAppList();
-
-        /* launch the app */
-        appListView.setOnItemClickListener((adapterView, view, i, l) -> launch(packageNamesArrList.get(i)));
-
-        /* try to open the app's settings */
-        appListView.setOnItemLongClickListener((adapterView, view, i, l) -> {
-            try {
-                Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
-                intent.setData(Uri.parse("package:" + packageNamesArrList.get(i)));
-                if (getAppNameFromPkgName(packageNamesArrList.get(i)).equals("")) {
-                    throw new Exception("package deleted");
-                }
-                startActivity(intent);
-            } catch (Exception e) {
-                showAppDeleted();
-            }
-            return true;
-        });
-
-
-
-        /* get all preferences */
-        prefs = PreferenceManager.getDefaultSharedPreferences(this);
-        prefEditor = prefs.edit();
-
-
-        leftBtn1.setOnLongClickListener((view) -> {
-            prefEditor.putBoolean("skeptic", !prefs.getBoolean("skeptic", false)).apply();
-            return true;
-        });
-
-        leftBtn1.setOnClickListener((view) -> {
-            prefEditor.putBoolean("show_menu", !prefs.getBoolean("show_menu", false)).apply();
-            filterAppList();
-        });
-
-        leftBtn2.setOnClickListener((view) ->
-
-                buttonPrefsFlow("left_2"));
-
-
-        rightBtn1.setOnClickListener((view) ->
-
-                buttonPrefsFlow("right_1"));
-
-        rightBtn2.setOnClickListener((view) ->
-
-                buttonPrefsFlow("right_2"));
-
-        leftPrefsListView.setOnItemClickListener((adapterView, view, i, l) ->
-
-                buttonPrefsFlow((String) adapterView.
-
-                        getItemAtPosition(i)));
-
-        rightPrefsListView.setOnItemClickListener((adapterView, view, i, l) ->
-
-                buttonPrefsFlow((String) adapterView.
-
-                        getItemAtPosition(i)));
-
-        leftBtn2.setOnLongClickListener((view) ->
-
-        {
-            buttonPrefsFlow("left_2_long");
-            return true;
-        });
-
-
-        rightBtn1.setOnLongClickListener((view) ->
-
-        {
-            buttonPrefsFlow("right_1_long");
-            return true;
-        });
-
-        rightBtn2.setOnLongClickListener((view) ->
-
-        {
-            buttonPrefsFlow("right_2_long");
-            return true;
-        });
-
-
-        leftPrefsListView.setOnItemLongClickListener((adapterView, view, i, l) ->
-
-        {
-            buttonPrefsFlow(adapterView.getItemAtPosition(i) + "_long");
-            return true;
-        });
-
-        rightPrefsListView.setOnItemLongClickListener((adapterView, view, i, l) ->
-
-        {
-            buttonPrefsFlow(adapterView.getItemAtPosition(i) + "_long");
-            return true;
-        });
-
-        searchKeyEdit.addTextChangedListener(new
-
-                                                     TextWatcher() {
-                                                         @Override
-                                                         public void beforeTextChanged(CharSequence charSequence, int i, int i1, int i2) {
-                                                         }
-
-                                                         @Override
-                                                         public void onTextChanged(CharSequence charSequence, int i, int i1, int i2) {
-                                                             setKey(String.valueOf(charSequence).toLowerCase(Locale.getDefault()));
-                                                         }
-
-                                                         @Override
-                                                         public void afterTextChanged(Editable editable) {
-                                                         }
-                                                     });
-
-        if (!prefs.getBoolean("help_shown", false)) {
-            showHelp();
-            prefEditor.putBoolean("help_shown", true);
-            prefEditor.apply();
+    private fun createContentView(): View {
+        val background = Color.rgb(16, 16, 16)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(background)
+            setPadding(dp(20), dp(12), dp(20), dp(8))
         }
 
+        searchField = EditText(this).apply {
+            hint = "Search apps"
+            setHintTextColor(Color.rgb(150, 150, 150))
+            setTextColor(Color.rgb(245, 245, 245))
+            textSize = 18f
+            singleLine = true
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+            backgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(110, 110, 110))
+            contentDescription = "Search installed apps"
+        }
+        root.addView(searchField, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(52)
+        ))
+
+        val listContainer = FrameLayout(this)
+        appList = ListView(this).apply {
+            divider = android.graphics.drawable.ColorDrawable(Color.rgb(42, 42, 42))
+            dividerHeight = dp(1)
+            cacheColorHint = background
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
+        val emptyMessage = TextView(this).apply {
+            text = "No apps found"
+            setTextColor(Color.rgb(170, 170, 170))
+            textSize = 16f
+            gravity = Gravity.CENTER
+        }
+        listContainer.addView(appList, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        listContainer.addView(emptyMessage, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        appList.emptyView = emptyMessage
+        root.addView(listContainer, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            0,
+            1f
+        ))
+
+        appAdapter = AppAdapter()
+        appList.adapter = appAdapter
+        appList.setOnItemClickListener { _, _, position, _ -> launchApp(appAdapter.getItem(position)) }
+        appList.setOnItemLongClickListener { _, _, position, _ ->
+            openAppSettings(appAdapter.getItem(position))
+            true
+        }
+        searchField.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                query = s?.toString()?.trim()?.lowercase(Locale.ROOT).orEmpty()
+                showMatchingApps()
+            }
+            override fun afterTextChanged(s: android.text.Editable?) = Unit
+        })
+        return root
     }
 
-    void showHelp() {
-        updateAppList();
-        filterAppList();
-        alertDialogBuilder.setMessage(R.string.help);
-        alertDialogBuilder.setPositiveButton(R.string.go, (dialogInterface, i) -> {
-        });
-        alertDialogBuilder.create().show();
+    override fun onStart() {
+        super.onStart()
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_CHANGED)
+            addDataScheme("package")
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(packageChanges, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(packageChanges, filter)
+        }
+        receiverRegistered = true
     }
 
-    void showAppDeleted() {
-        updateAppList();
-        filterAppList();
-        alertDialogBuilder.setMessage(R.string.appDeleted);
-        alertDialogBuilder.setPositiveButton(R.string.go, (dialogInterface, i) -> {
-        });
-        alertDialogBuilder.create().show();
+    override fun onStop() {
+        pendingRefresh?.let(mainHandler::removeCallbacks)
+        pendingRefresh = null
+        if (receiverRegistered) {
+            unregisterReceiver(packageChanges)
+            receiverRegistered = false
+        }
+        super.onStop()
     }
 
-    void setKey(String s) {
-        searchString = s;
-        filterAppList();
+    override fun onDestroy() {
+        worker.shutdownNow()
+        mainHandler.removeCallbacksAndMessages(null)
+        super.onDestroy()
     }
 
-    void buttonPrefsFlow(String key) {
-        String pkgName = prefs.getString(key, "");
-        if (!pkgName.equals("")) {
-            String appName;
-            appName = getAppNameFromPkgName(pkgName);
-            if (appName.equals("")) {
-                prefEditor.putString(key, "").apply();
-                showAppDeleted();
-                changeOnPressAppDialog(key);
-            } else {
-                if (prefs.getBoolean("skeptic", false)) {
-                    launchOrChangePref(key, appName, pkgName);
-                } else {
-                    launch(pkgName);
+    private fun scheduleRefresh() {
+        pendingRefresh?.let(mainHandler::removeCallbacks)
+        pendingRefresh = Runnable { refreshApps() }
+        mainHandler.postDelayed(pendingRefresh!!, 300L)
+    }
+
+    /** Query package metadata off the UI thread, only at startup or when packages change. */
+    private fun refreshApps() {
+        worker.execute {
+            val uniqueApps = LinkedHashMap<String, LauncherApp>()
+            val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            val activities = packageManager.queryIntentActivities(launcherIntent, PackageManager.MATCH_ALL)
+            for (activity in activities) {
+                val packageName = activity.activityInfo?.packageName ?: continue
+                if (!uniqueApps.containsKey(packageName)) {
+                    val label = activity.loadLabel(packageManager)?.toString() ?: packageName
+                    uniqueApps[packageName] = LauncherApp(packageName, label)
                 }
             }
-        } else {
-            changeOnPressAppDialog(key);
+            val collator = Collator.getInstance()
+            val sortedApps = uniqueApps.values.sortedWith { first, second ->
+                collator.compare(first.label, second.label)
+            }
+            mainHandler.post {
+                if (!isFinishing && !isDestroyed) {
+                    apps.clear()
+                    apps.addAll(sortedApps)
+                    showMatchingApps()
+                }
+            }
         }
     }
 
-    void launchOrChangePref(String key, String appName, String packageName) {
-        alertDialogBuilder = new AlertDialog.Builder(this);
-        alertDialogBuilder.setTitle(appName);
-        alertDialogBuilder.setPositiveButton(R.string.go, (dialogInterface, i1) -> launch(packageName));
-        alertDialogBuilder.setNegativeButton(R.string.change, (dialogInterface, i1) -> changeOnPressAppDialog(key));
-        alertDialogBuilder.create().show();
+    private fun showMatchingApps() {
+        if (!::appAdapter.isInitialized) return
+        appAdapter.replaceWith(apps.filter { it.label.lowercase(Locale.ROOT).contains(query) })
     }
 
-
-    void changeOnPressAppDialog(String key) {
-        tempShowApp = true;
-        alertDialogBuilder = new AlertDialog.Builder(this);
-        alertDialogBuilder.setView(R.layout.main_listview);
-        alertDialogBuilder.setAdapter(appListView.getAdapter(), (dialogInterface, i1) -> {
-            prefEditor.putString(key, packageNamesArrList.get(i1));
-            prefEditor.apply();
-            tempShowApp = false;
-            filterAppList();
-        });
-        alertDialogBuilder.setOnCancelListener((dialogInterface) -> {
-            tempShowApp = false;
-            filterAppList();
-        });
-        filterAppList();
-        alertDialogBuilder.create().show();
-    }
-
-
-    String getAppNameFromPkgName(String pkgName) {
-        try {
-            return (String) packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkgName, 0));
-        } catch (PackageManager.NameNotFoundException ne) {
-            ne.printStackTrace();
-            return "";
-        }
-    }
-
-    public void onBackPressed() {
-        searchString = "";
-        searchKeyEdit.getText().clear();
-    }
-
-
-    void launch(String nm) {
-        ((InputMethodManager) this.getSystemService(Context.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(appListView.getWindowToken(), 0);
-        if (nm.equals("org.n0.speedy_launch")) {
-            showHelp();
-        } else {
+    private fun launchApp(app: LauncherApp) {
+        (getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager)
+            ?.hideSoftInputFromWindow(searchField.windowToken, 0)
+        val launchIntent = packageManager.getLaunchIntentForPackage(app.packageName)
+        if (launchIntent != null) {
             try {
-                startActivity(packageManager.getLaunchIntentForPackage(nm));
-            } catch (Exception e) {
-                showAppDeleted();
+                startActivity(launchIntent)
+            } catch (_: android.content.ActivityNotFoundException) {
+                scheduleRefresh()
             }
+        } else {
+            scheduleRefresh()
         }
     }
 
-    void updateAppList() {
-        /* fetch all the installed apps */
-        List<ResolveInfo> resolveInfoPackageList = packageManager.queryIntentActivities(new Intent(Intent.ACTION_MAIN, null).addCategory(Intent.CATEGORY_LAUNCHER), PackageManager.MATCH_ALL);
-        resolveInfoPackageList.sort(new ResolveInfo.DisplayNameComparator(packageManager));
-        packageList = resolveInfoPackageList.stream().map(resolveInfo -> new String[]{resolveInfo.activityInfo.packageName, (String) resolveInfo.loadLabel(packageManager)}).collect(Collectors.toList());
+    private fun openAppSettings(app: LauncherApp) {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = Uri.fromParts("package", app.packageName, null)
+        }
+        startActivity(intent)
     }
 
-    void clearList() {
-        appAdapter.clear();
-        packageNamesArrList.clear();
+    override fun onBackPressed() {
+        if (searchField.text.isNotEmpty()) {
+            searchField.text.clear()
+        } else {
+            super.onBackPressed()
+        }
     }
 
-    void fetchAllApps() {
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
 
-        /* clear the global search string */
-        searchString = "";
+    private data class LauncherApp(val packageName: String, val label: String)
 
-        searchKeyEdit.getText().clear();
+    /** Reuses a plain TextView per visible row; app icons are intentionally not loaded. */
+    private inner class AppAdapter : BaseAdapter() {
+        private val visibleApps = ArrayList<LauncherApp>()
 
-        /* clear the list before repopulating */
-        clearList();
-
-        if (!tempShowApp && searchString.length() == 0 && !prefs.getBoolean("show_menu", false)) {
-            showApps();
-            return;
+        fun replaceWith(items: List<LauncherApp>) {
+            visibleApps.clear()
+            visibleApps.addAll(items)
+            notifyDataSetChanged()
         }
 
-        /* add the apps names to the adapter, and the package name to the array list */
-        for (String[] resolver : packageList) {
-            appAdapter.add(resolver[1]);
-            packageNamesArrList.add(resolver[0]);
-        }
+        override fun getCount(): Int = visibleApps.size
+        override fun getItem(position: Int): LauncherApp = visibleApps[position]
+        override fun getItemId(position: Int): Long = position.toLong()
 
-        showApps();
-    }
-
-    void filterAppList() {
-        clearList();
-        if (!tempShowApp && searchString.length() == 0 && !prefs.getBoolean("show_menu", false)) {
-            return;
-        }
-        /* check each package name and add only the ones that match the search
-        string */
-        for (String[] resolver : packageList) {
-            if (resolver[1].toLowerCase(Locale.getDefault()).contains(searchString)) {
-                appAdapter.add(resolver[1]);
-                packageNamesArrList.add(resolver[0]);
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val row = (convertView as? TextView) ?: TextView(this@LauncherActivity).apply {
+                setTextColor(Color.rgb(245, 245, 245))
+                textSize = 18f
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(4), dp(12), dp(4), dp(12))
+                minHeight = dp(48)
+                isSingleLine = true
             }
+            row.text = visibleApps[position].label
+            return row
         }
-        appListView.setSelection(0);
-    }
-
-    /* show the app name adapter as the app list */
-    void showApps() {
-        appListView.setAdapter(appAdapter);
-        appListView.setSelection(0);
-    }
-
-
-    @Override
-    protected void onResume() {
-        super.onResume();
-        fetchAllApps();
     }
 }
