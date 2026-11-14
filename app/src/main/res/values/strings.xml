@@ -1,3 +1,8 @@
 <resources>
     <string name="app_name">Nothing Launcher</string>
+    <string name="left1">▦</string>
+    <string name="left2">1</string>
+    <string name="key">Search</string>
+    <string name="right1">2</string>
+    <string name="right2">3</string>
 </resources>
