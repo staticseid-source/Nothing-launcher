@@ -70,7 +70,7 @@ class LauncherActivity : Activity() {
             setHintTextColor(Color.rgb(150, 150, 150))
             setTextColor(textColor)
             textSize = 18f
-            singleLine = true
+            isSingleLine = true
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
                 android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
