@@ -1,20 +1,24 @@
-# Speedy Launcher
-This is a fork of: 
+# Nothing Launcher
 
-[f-droid app](https://f-droid.org/en/packages/org.biotstoiq.launch/) 
+A small, icon-free Android home-screen launcher focused on keeping idle work and UI overhead low.
 
-[gitlab repo](https://gitlab.com/biotstoiq/launch)
+## Design
 
-# Style revisited and updated
+- Native Android views only; no UI framework or third-party runtime dependencies.
+- Queries and sorts launchable apps on a single background worker at startup, then refreshes only when installed apps change.
+- Filters cached app labels as you type.
+- Displays text-only rows and does not load or retain app icons.
+- Has no services, polling, animations, network access, or periodic jobs.
+- Supports launching apps, opening app info with a long press, and choosing it as the Android HOME app.
 
-Change to package name and app name happen only to avoid confusion
+Kotlin is used for implementation, but the language alone does not make an app faster or smaller. The main savings come from doing less work and avoiding unnecessary resources and dependencies. Release builds enable R8 shrinking and resource shrinking.
 
-# Release
+## Build
 
-[latest release](https://github.com/NessunoZero/speedy_launcher/releases/latest)...
+Open this project in Android Studio or build it with the Gradle wrapper:
 
-## Speedy Launcher on "Izzy On Droid"
+```sh
+./gradlew assembleDebug
+```
 
-![Avaible on Izzy On Droid](https://img.shields.io/endpoint?url=https://apt.izzysoft.de/fdroid/api/v1/shield/org.n0.speedy_launch)
-
-<a href="https://apt.izzysoft.de/fdroid/index/apk/org.n0.speedy_launch"><img src="https://gitlab.com/IzzyOnDroid/repo/-/raw/master/assets/IzzyOnDroid.png" width="30%" /></a>
+Minimum Android version: Android 7.0 (API 24).

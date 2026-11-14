@@ -1,14 +1,9 @@
 plugins {
     id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
 }
 
-
-
 android {
-    signingConfigs {
-        release {
-        }
-    }
     namespace "org.n0.speedy_launch"
     compileSdk 33
 
@@ -16,30 +11,29 @@ android {
         applicationId "org.n0.speedy_launch"
         minSdk 24
         targetSdk 33
-        versionCode 11
-        versionName "1.5"
-        testFunctionalTest false
-    }
-
-    tasks.withType(JavaCompile) {
-        options.deprecation = true
+        versionCode 12
+        versionName "2.0"
     }
 
     buildTypes {
         release {
-            minifyEnabled false
+            minifyEnabled true
+            shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            debuggable = false
+            debuggable false
         }
         debug {
-            minifyEnabled = false
-            debuggable = true
+            minifyEnabled false
+            debuggable true
         }
-
     }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = '1.8'
     }
 }
