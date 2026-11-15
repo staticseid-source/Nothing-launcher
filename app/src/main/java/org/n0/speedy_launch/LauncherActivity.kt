@@ -10,10 +10,12 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
+import android.view.inputmethod.EditorInfo
 import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -33,6 +35,7 @@ class LauncherActivity : Activity() {
     private lateinit var searchField: EditText
     private lateinit var appList: ListView
     private lateinit var refreshButton: Button
+    /** The last search explicitly submitted by the user. */
     private var query = ""
     private var isRefreshing = false
 
@@ -66,9 +69,22 @@ class LauncherActivity : Activity() {
             isSingleLine = true
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
                 android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+            imeOptions = EditorInfo.IME_ACTION_SEARCH
             backgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(110, 110, 110))
-            contentDescription = "Search installed apps"
+            contentDescription = "Search installed apps; press Search to filter"
+            setOnEditorActionListener { _, actionId, event ->
+                val enterPressed = event?.keyCode == KeyEvent.KEYCODE_ENTER &&
+                    event.action == KeyEvent.ACTION_UP
+                if (actionId == EditorInfo.IME_ACTION_SEARCH ||
+                    actionId == EditorInfo.IME_ACTION_DONE || enterPressed) {
+                    applySearch()
+                    (getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager)
+                        ?.hideSoftInputFromWindow(windowToken, 0)
+                    true
+                } else {
+                    false
+                }
+            }
         }
         searchRow.addView(searchField, LinearLayout.LayoutParams(
             0,
@@ -124,15 +140,13 @@ class LauncherActivity : Activity() {
             openAppSettings(appAdapter.getItem(position))
             true
         }
-        searchField.addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                query = s?.toString()?.trim()?.lowercase(Locale.ROOT).orEmpty()
-                showMatchingApps()
-            }
-            override fun afterTextChanged(s: android.text.Editable?) = Unit
-        })
         return root
+    }
+
+    /** Apply the typed search only after the user submits it from the keyboard. */
+    private fun applySearch() {
+        query = searchField.text.toString().trim().lowercase(Locale.ROOT)
+        showMatchingApps()
     }
 
     /** Query installed launcher apps on a temporary worker thread; no automatic package monitoring. */
@@ -205,6 +219,8 @@ class LauncherActivity : Activity() {
     override fun onBackPressed() {
         if (searchField.text.isNotEmpty()) {
             searchField.text.clear()
+            query = ""
+            showMatchingApps()
         } else {
             super.onBackPressed()
         }
