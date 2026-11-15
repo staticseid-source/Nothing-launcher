@@ -1,14 +1,10 @@
 package org.n0.speedy_launch
 
 import android.app.Activity
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -19,6 +15,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.BaseAdapter
+import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -27,25 +24,17 @@ import android.widget.TextView
 import java.text.Collator
 import java.util.LinkedHashMap
 import java.util.Locale
-import java.util.concurrent.Executors
 
-/** A small, icon-free HOME activity. It has no service, polling loop, or third-party UI code. */
+/** A small, icon-free HOME activity with on-demand app-list refresh. */
 class LauncherActivity : Activity() {
-    private val worker = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val apps = ArrayList<LauncherApp>()
     private lateinit var appAdapter: AppAdapter
     private lateinit var searchField: EditText
     private lateinit var appList: ListView
+    private lateinit var refreshButton: Button
     private var query = ""
-    private var receiverRegistered = false
-    private var pendingRefresh: Runnable? = null
-
-    private val packageChanges = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            scheduleRefresh()
-        }
-    }
+    private var isRefreshing = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,6 +54,10 @@ class LauncherActivity : Activity() {
             setPadding(dp(20), dp(12), dp(20), dp(8))
         }
 
+        val searchRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
         searchField = EditText(this).apply {
             hint = "Search apps"
             setHintTextColor(Color.rgb(150, 150, 150))
@@ -77,10 +70,22 @@ class LauncherActivity : Activity() {
             backgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(110, 110, 110))
             contentDescription = "Search installed apps"
         }
-        root.addView(searchField, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
+        searchRow.addView(searchField, LinearLayout.LayoutParams(
+            0,
+            dp(52),
+            1f
+        ))
+        refreshButton = Button(this).apply {
+            text = "Refresh"
+            textSize = 14f
+            contentDescription = "Refresh app list"
+            setOnClickListener { refreshApps() }
+        }
+        searchRow.addView(refreshButton, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
             dp(52)
         ))
+        root.addView(searchRow)
 
         val listContainer = FrameLayout(this)
         appList = ListView(this).apply {
@@ -130,69 +135,45 @@ class LauncherActivity : Activity() {
         return root
     }
 
-    override fun onStart() {
-        super.onStart()
-        val filter = IntentFilter().apply {
-            addAction(Intent.ACTION_PACKAGE_ADDED)
-            addAction(Intent.ACTION_PACKAGE_REMOVED)
-            addAction(Intent.ACTION_PACKAGE_CHANGED)
-            addDataScheme("package")
-        }
-        if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(packageChanges, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            registerReceiver(packageChanges, filter)
-        }
-        receiverRegistered = true
-    }
-
-    override fun onStop() {
-        pendingRefresh?.let(mainHandler::removeCallbacks)
-        pendingRefresh = null
-        if (receiverRegistered) {
-            unregisterReceiver(packageChanges)
-            receiverRegistered = false
-        }
-        super.onStop()
-    }
-
-    override fun onDestroy() {
-        worker.shutdownNow()
-        mainHandler.removeCallbacksAndMessages(null)
-        super.onDestroy()
-    }
-
-    private fun scheduleRefresh() {
-        pendingRefresh?.let(mainHandler::removeCallbacks)
-        pendingRefresh = Runnable { refreshApps() }
-        mainHandler.postDelayed(pendingRefresh!!, 300L)
-    }
-
-    /** Query package metadata off the UI thread, and only when starting or packages change. */
+    /** Query installed launcher apps on a temporary worker thread; no automatic package monitoring. */
     private fun refreshApps() {
-        worker.execute {
-            val uniqueApps = LinkedHashMap<String, LauncherApp>()
-            val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-            val activities = packageManager.queryIntentActivities(launcherIntent, PackageManager.MATCH_ALL)
-            for (activity in activities) {
-                val packageName = activity.activityInfo?.packageName ?: continue
-                if (!uniqueApps.containsKey(packageName)) {
-                    val label = activity.loadLabel(packageManager)?.toString() ?: packageName
-                    uniqueApps[packageName] = LauncherApp(packageName, label)
+        if (isRefreshing) return
+        isRefreshing = true
+        refreshButton.isEnabled = false
+
+        Thread({
+            val refreshedApps = try {
+                val uniqueApps = LinkedHashMap<String, LauncherApp>()
+                val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                val activities = packageManager.queryIntentActivities(launcherIntent, PackageManager.MATCH_ALL)
+                for (activity in activities) {
+                    val packageName = activity.activityInfo?.packageName ?: continue
+                    if (!uniqueApps.containsKey(packageName)) {
+                        val label = activity.loadLabel(packageManager)?.toString() ?: packageName
+                        uniqueApps[packageName] = LauncherApp(packageName, label)
+                    }
                 }
+                val collator = Collator.getInstance()
+                uniqueApps.values.sortedWith { first, second ->
+                    collator.compare(first.label, second.label)
+                }
+            } catch (_: Exception) {
+                null
             }
-            val collator = Collator.getInstance()
-            val sortedApps = uniqueApps.values.sortedWith { first, second ->
-                collator.compare(first.label, second.label)
-            }
+
             mainHandler.post {
-                if (!isFinishing && !isDestroyed) {
+                isRefreshing = false
+                if (isFinishing || isDestroyed) return@post
+                refreshButton.isEnabled = true
+                refreshedApps?.let {
                     apps.clear()
-                    apps.addAll(sortedApps)
+                    apps.addAll(it)
                     showMatchingApps()
                 }
             }
+        }, "app-list-refresh").apply {
+            isDaemon = true
+            start()
         }
     }
 
@@ -209,10 +190,8 @@ class LauncherActivity : Activity() {
             try {
                 startActivity(launchIntent)
             } catch (_: android.content.ActivityNotFoundException) {
-                scheduleRefresh()
+                // The user can tap Refresh to update the list if an app was removed.
             }
-        } else {
-            scheduleRefresh()
         }
     }
 
