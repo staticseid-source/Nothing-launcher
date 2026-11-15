@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -14,8 +15,8 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.view.inputmethod.InputMethodManager
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -23,6 +24,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
+import android.widget.Toast
 import java.text.Collator
 import java.util.LinkedHashMap
 import java.util.Locale
@@ -42,9 +44,22 @@ class LauncherActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
-        window.statusBarColor = Color.rgb(16, 16, 16)
-        window.navigationBarColor = Color.rgb(16, 16, 16)
+        // FIX: statusBarColor / navigationBarColor are no-ops on API 35+.
+        if (Build.VERSION.SDK_INT < 35) {
+            @Suppress("DEPRECATION")
+            window.statusBarColor = Color.rgb(16, 16, 16)
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = Color.rgb(16, 16, 16)
+        }
         setContentView(createContentView())
+
+        // FIX: restore query and search text across rotation.
+        savedInstanceState?.getString(STATE_QUERY)?.let { query = it }
+        savedInstanceState?.getString(STATE_SEARCH_TEXT)?.let {
+            searchField.setText(it)
+            searchField.setSelection(it.length)
+        }
+
         refreshApps()
     }
 
@@ -86,11 +101,8 @@ class LauncherActivity : Activity() {
                 }
             }
         }
-        searchRow.addView(searchField, LinearLayout.LayoutParams(
-            0,
-            dp(52),
-            1f
-        ))
+        searchRow.addView(searchField, LinearLayout.LayoutParams(0, dp(52), 1f))
+
         refreshButton = Button(this).apply {
             text = "Refresh"
             textSize = 14f
@@ -116,7 +128,6 @@ class LauncherActivity : Activity() {
             setTextColor(Color.rgb(170, 170, 170))
             textSize = 16f
             gravity = Gravity.CENTER
-            visibility = View.GONE
         }
         listContainer.addView(appList, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -156,29 +167,37 @@ class LauncherActivity : Activity() {
         refreshButton.isEnabled = false
 
         Thread({
-            val refreshedApps = try {
+            var refreshedApps: List<LauncherApp>? = null
+            var failed = false
+            try {
                 val uniqueApps = LinkedHashMap<String, LauncherApp>()
                 val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                val activities = packageManager.queryIntentActivities(launcherIntent, PackageManager.MATCH_ALL)
-                for (activity in activities) {
+                // FIX: drop MATCH_ALL — unnecessary for a launcher query.
+                val activities = packageManager.queryIntentActivities(launcherIntent, 0)
+                // PERF: stable dedupe order so which label is kept doesn't vary by OEM.
+                val sortedActivities = activities.sortedBy { it.activityInfo?.name.orEmpty() }
+                for (activity in sortedActivities) {
                     val packageName = activity.activityInfo?.packageName ?: continue
-                    if (!uniqueApps.containsKey(packageName)) {
-                        val label = activity.loadLabel(packageManager)?.toString() ?: packageName
-                        uniqueApps[packageName] = LauncherApp(packageName, label)
-                    }
+                    if (uniqueApps.containsKey(packageName)) continue
+                    val label = activity.loadLabel(packageManager)?.toString() ?: packageName
+                    uniqueApps[packageName] = LauncherApp(packageName, label)
                 }
                 val collator = Collator.getInstance()
-                uniqueApps.values.sortedWith { first, second ->
-                    collator.compare(first.label, second.label)
+                refreshedApps = uniqueApps.values.sortedWith { a, b ->
+                    collator.compare(a.label, b.label)
                 }
             } catch (_: Exception) {
-                null
+                failed = true
             }
 
             mainHandler.post {
                 isRefreshing = false
                 if (isFinishing || isDestroyed) return@post
                 refreshButton.isEnabled = true
+                if (failed) {
+                    Toast.makeText(this, "Refresh failed", Toast.LENGTH_SHORT).show()
+                    return@post
+                }
                 refreshedApps?.let {
                     apps.clear()
                     apps.addAll(it)
@@ -193,7 +212,11 @@ class LauncherActivity : Activity() {
 
     private fun showMatchingApps() {
         if (!::appAdapter.isInitialized) return
-        appAdapter.replaceWith(apps.filter { it.label.lowercase(Locale.ROOT).contains(query) })
+        // PERF: compare against precomputed key; no per-search lowercasing.
+        appAdapter.replaceWith(
+            if (query.isEmpty()) apps
+            else apps.filter { it.searchKey.contains(query) }
+        )
     }
 
     private fun launchApp(app: LauncherApp) {
@@ -216,6 +239,14 @@ class LauncherActivity : Activity() {
         startActivity(intent)
     }
 
+    // FIX: persist query + search text across rotation.
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(STATE_QUERY, query)
+        outState.putString(STATE_SEARCH_TEXT, searchField.text?.toString().orEmpty())
+    }
+
+    @Suppress("DEPRECATION")
     override fun onBackPressed() {
         if (searchField.text.isNotEmpty()) {
             searchField.text.clear()
@@ -228,7 +259,12 @@ class LauncherActivity : Activity() {
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
 
-    private data class LauncherApp(val packageName: String, val label: String)
+    // PERF: precomputed lowercase key for filtering.
+    private data class LauncherApp(
+        val packageName: String,
+        val label: String,
+        val searchKey: String = label.lowercase(Locale.ROOT)
+    )
 
     /** Reuses one plain TextView per visible row; app icons are intentionally not loaded. */
     private inner class AppAdapter : BaseAdapter() {
@@ -256,5 +292,10 @@ class LauncherActivity : Activity() {
             row.text = visibleApps[position].label
             return row
         }
+    }
+
+    private companion object {
+        const val STATE_QUERY = "launcher.query"
+        const val STATE_SEARCH_TEXT = "launcher.searchText"
     }
 }
