@@ -1,4 +1,4 @@
-package org.n0.speedy_launch
+package org.n0.absent_launch
 
 import android.app.Activity
 import android.content.ActivityNotFoundException
