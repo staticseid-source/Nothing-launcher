@@ -1,20 +1,22 @@
 package org.n0.speedy_launch
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
+import android.content.pm.LauncherApps
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
+import android.os.Process
 import android.provider.Settings
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
-import android.view.WindowManager
+import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.BaseAdapter
@@ -25,26 +27,40 @@ import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import java.text.Collator
-import java.util.LinkedHashMap
+import java.text.Normalizer
 import java.util.Locale
 
-/** A small, icon-free HOME activity with on-demand app-list refresh. */
+private class LauncherApp(val component: ComponentName, val label: String)
+
+/** Lowercase and strip accents so "cafe" matches "Café". Run at search time; nothing stored. */
+private fun fold(s: String): String {
+    val d = Normalizer.normalize(s, Normalizer.Form.NFD)
+    val sb = StringBuilder(d.length)
+    for (c in d) {
+        if (Character.getType(c) != Character.NON_SPACING_MARK.toInt()) sb.append(c)
+    }
+    return sb.toString().lowercase(Locale.ROOT)
+}
+
+/**
+ * Memory-lean icon-free HOME activity. The app list lives only while the UI is visible:
+ * it is dropped when the UI is hidden and reloaded on return.
+ */
 class LauncherActivity : Activity() {
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val apps = ArrayList<LauncherApp>()
+    private var apps: List<LauncherApp> = emptyList()
     private lateinit var appAdapter: AppAdapter
     private lateinit var searchField: EditText
     private lateinit var appList: ListView
     private lateinit var refreshButton: Button
-    /** The last search explicitly submitted by the user. */
+    /** Folded query last submitted by the user. */
     private var query = ""
     private var isRefreshing = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
-        // FIX: statusBarColor / navigationBarColor are no-ops on API 35+.
         if (Build.VERSION.SDK_INT < 35) {
             @Suppress("DEPRECATION")
             window.statusBarColor = Color.rgb(16, 16, 16)
@@ -53,23 +69,48 @@ class LauncherActivity : Activity() {
         }
         setContentView(createContentView())
 
-        // FIX: restore query and search text across rotation.
-        savedInstanceState?.getString(STATE_QUERY)?.let { query = it }
-        savedInstanceState?.getString(STATE_SEARCH_TEXT)?.let {
-            searchField.setText(it)
-            searchField.setSelection(it.length)
+        // Predictive back: onBackPressed is never called on API 33+ when enabled.
+        if (Build.VERSION.SDK_INT >= 33) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                OnBackInvokedCallback { clearSearch() }
+            )
         }
+    }
 
-        refreshApps()
+    /** Load the list when the UI becomes visible and it isn't already in memory. */
+    override fun onStart() {
+        super.onStart()
+        if (apps.isEmpty()) refreshApps()
+    }
+
+    /** Free the list once the UI is hidden; it is rebuilt in onStart. */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= TRIM_MEMORY_UI_HIDDEN) {
+            apps = emptyList()
+            appAdapter.replaceWith(emptyList())
+        }
     }
 
     private fun createContentView(): View {
         val background = Color.rgb(16, 16, 16)
-        val textColor = Color.rgb(245, 245, 245)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(background)
             setPadding(dp(20), dp(12), dp(20), dp(8))
+        }
+        // Edge-to-edge is enforced on API 35+: pad for bars, cutout and keyboard.
+        if (Build.VERSION.SDK_INT >= 35) {
+            root.setOnApplyWindowInsetsListener { v, insets ->
+                val b = insets.getInsets(
+                    WindowInsets.Type.systemBars() or
+                        WindowInsets.Type.displayCutout() or
+                        WindowInsets.Type.ime()
+                )
+                v.setPadding(dp(20) + b.left, dp(12) + b.top, dp(20) + b.right, dp(8) + b.bottom)
+                WindowInsets.CONSUMED
+            }
         }
 
         val searchRow = LinearLayout(this).apply {
@@ -79,7 +120,7 @@ class LauncherActivity : Activity() {
         searchField = EditText(this).apply {
             hint = "Search apps"
             setHintTextColor(Color.rgb(150, 150, 150))
-            setTextColor(textColor)
+            setTextColor(Color.rgb(245, 245, 245))
             textSize = 18f
             isSingleLine = true
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
@@ -93,8 +134,6 @@ class LauncherActivity : Activity() {
                 if (actionId == EditorInfo.IME_ACTION_SEARCH ||
                     actionId == EditorInfo.IME_ACTION_DONE || enterPressed) {
                     applySearch()
-                    (getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager)
-                        ?.hideSoftInputFromWindow(windowToken, 0)
                     true
                 } else {
                     false
@@ -109,10 +148,10 @@ class LauncherActivity : Activity() {
             contentDescription = "Refresh app list"
             setOnClickListener { refreshApps() }
         }
-        searchRow.addView(refreshButton, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            dp(52)
-        ))
+        searchRow.addView(
+            refreshButton,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(52))
+        )
         root.addView(searchRow)
 
         val listContainer = FrameLayout(this)
@@ -129,20 +168,25 @@ class LauncherActivity : Activity() {
             textSize = 16f
             gravity = Gravity.CENTER
         }
-        listContainer.addView(appList, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT
-        ))
-        listContainer.addView(emptyMessage, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT
-        ))
+        listContainer.addView(
+            appList,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        listContainer.addView(
+            emptyMessage,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
         appList.emptyView = emptyMessage
-        root.addView(listContainer, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            0,
-            1f
-        ))
+        root.addView(
+            listContainer,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+        )
 
         appAdapter = AppAdapter()
         appList.adapter = appAdapter
@@ -154,53 +198,62 @@ class LauncherActivity : Activity() {
         return root
     }
 
-    /** Apply the typed search only after the user submits it from the keyboard. */
+    /** Apply the typed search after the user submits it. A single match launches immediately. */
     private fun applySearch() {
-        query = searchField.text.toString().trim().lowercase(Locale.ROOT)
+        query = fold(searchField.text.toString().trim())
         showMatchingApps()
+        hideKeyboard()
+        if (query.isNotEmpty() && appAdapter.count == 1) {
+            launchApp(appAdapter.getItem(0))
+        }
     }
 
-    /** Query installed launcher apps on a temporary worker thread; no automatic package monitoring. */
+    private fun clearSearch() {
+        searchField.text.clear()
+        searchField.clearFocus()
+        query = ""
+        showMatchingApps()
+        appList.setSelection(0)
+        hideKeyboard()
+    }
+
+    private fun hideKeyboard() {
+        (getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager)
+            ?.hideSoftInputFromWindow(searchField.windowToken, 0)
+    }
+
+    /** Query launcher activities on a short-lived worker thread; no package monitoring. */
     private fun refreshApps() {
         if (isRefreshing) return
         isRefreshing = true
         refreshButton.isEnabled = false
 
         Thread({
-            var refreshedApps: List<LauncherApp>? = null
-            var failed = false
+            var result: List<LauncherApp>? = null
             try {
-                val uniqueApps = LinkedHashMap<String, LauncherApp>()
-                val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                // FIX: drop MATCH_ALL — unnecessary for a launcher query.
-                val activities = packageManager.queryIntentActivities(launcherIntent, 0)
-                // PERF: stable dedupe order so which label is kept doesn't vary by OEM.
-                val sortedActivities = activities.sortedBy { it.activityInfo?.name.orEmpty() }
-                for (activity in sortedActivities) {
-                    val packageName = activity.activityInfo?.packageName ?: continue
-                    if (uniqueApps.containsKey(packageName)) continue
-                    val label = activity.loadLabel(packageManager)?.toString() ?: packageName
-                    uniqueApps[packageName] = LauncherApp(packageName, label)
+                val launcherApps = getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
+                val infos = launcherApps.getActivityList(null, Process.myUserHandle())
+                val list = ArrayList<LauncherApp>(infos.size)
+                for (info in infos) {
+                    val component = info.componentName
+                    list.add(LauncherApp(component, info.label?.toString() ?: component.packageName))
                 }
+                // No CollationKey array per app: slower compare, but no extra allocation.
                 val collator = Collator.getInstance()
-                refreshedApps = uniqueApps.values.sortedWith { a, b ->
-                    collator.compare(a.label, b.label)
-                }
+                list.sortWith { a, b -> collator.compare(a.label, b.label) }
+                result = list
             } catch (_: Exception) {
-                failed = true
             }
 
-            mainHandler.post {
+            runOnUiThread {
                 isRefreshing = false
-                if (isFinishing || isDestroyed) return@post
+                if (isFinishing || isDestroyed) return@runOnUiThread
                 refreshButton.isEnabled = true
-                if (failed) {
+                val loaded = result
+                if (loaded == null) {
                     Toast.makeText(this, "Refresh failed", Toast.LENGTH_SHORT).show()
-                    return@post
-                }
-                refreshedApps?.let {
-                    apps.clear()
-                    apps.addAll(it)
+                } else {
+                    apps = loaded
                     showMatchingApps()
                 }
             }
@@ -212,67 +265,70 @@ class LauncherActivity : Activity() {
 
     private fun showMatchingApps() {
         if (!::appAdapter.isInitialized) return
-        // PERF: compare against precomputed key; no per-search lowercasing.
-        appAdapter.replaceWith(
-            if (query.isEmpty()) apps
-            else apps.filter { it.searchKey.contains(query) }
-        )
+        appAdapter.replaceWith(if (query.isEmpty()) apps else matches(query))
+    }
+
+    /** Prefix matches first, then other substring matches, in one result list. */
+    private fun matches(q: String): List<LauncherApp> {
+        val out = ArrayList<LauncherApp>()
+        for (app in apps) {
+            if (fold(app.label).startsWith(q)) out.add(app)
+        }
+        for (app in apps) {
+            val key = fold(app.label)
+            if (!key.startsWith(q) && key.contains(q)) out.add(app)
+        }
+        return out
     }
 
     private fun launchApp(app: LauncherApp) {
-        (getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager)
-            ?.hideSoftInputFromWindow(searchField.windowToken, 0)
-        val launchIntent = packageManager.getLaunchIntentForPackage(app.packageName)
-        if (launchIntent != null) {
-            try {
-                startActivity(launchIntent)
-            } catch (_: android.content.ActivityNotFoundException) {
-                // The user can tap Refresh to update the list if an app was removed.
-            }
+        hideKeyboard()
+        val intent = Intent(Intent.ACTION_MAIN)
+            .addCategory(Intent.CATEGORY_LAUNCHER)
+            .setComponent(app.component)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+        try {
+            startActivity(intent)
+        } catch (_: ActivityNotFoundException) {
+            refreshApps() // App was probably removed.
+        } catch (_: SecurityException) {
+            refreshApps()
         }
     }
 
     private fun openAppSettings(app: LauncherApp) {
         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-            data = Uri.fromParts("package", app.packageName, null)
+            data = Uri.fromParts("package", app.component.packageName, null)
         }
-        startActivity(intent)
+        try {
+            startActivity(intent)
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(this, "Can't open app settings", Toast.LENGTH_SHORT).show()
+        }
     }
 
-    // FIX: persist query + search text across rotation.
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        outState.putString(STATE_QUERY, query)
-        outState.putString(STATE_SEARCH_TEXT, searchField.text?.toString().orEmpty())
+    /** Home pressed while already open (singleTask): reset to a clean state. */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_HOME)) {
+            clearSearch()
+        }
     }
 
+    /** Pre-API 33 only. A home screen never finishes on back. */
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
-        if (searchField.text.isNotEmpty()) {
-            searchField.text.clear()
-            query = ""
-            showMatchingApps()
-        } else {
-            super.onBackPressed()
-        }
+        clearSearch()
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
 
-    // PERF: precomputed lowercase key for filtering.
-    private data class LauncherApp(
-        val packageName: String,
-        val label: String,
-        val searchKey: String = label.lowercase(Locale.ROOT)
-    )
-
     /** Reuses one plain TextView per visible row; app icons are intentionally not loaded. */
     private inner class AppAdapter : BaseAdapter() {
-        private val visibleApps = ArrayList<LauncherApp>()
+        private var visibleApps: List<LauncherApp> = emptyList()
 
         fun replaceWith(items: List<LauncherApp>) {
-            visibleApps.clear()
-            visibleApps.addAll(items)
+            visibleApps = items
             notifyDataSetChanged()
         }
 
@@ -292,10 +348,5 @@ class LauncherActivity : Activity() {
             row.text = visibleApps[position].label
             return row
         }
-    }
-
-    private companion object {
-        const val STATE_QUERY = "launcher.query"
-        const val STATE_SEARCH_TEXT = "launcher.searchText"
     }
 }
