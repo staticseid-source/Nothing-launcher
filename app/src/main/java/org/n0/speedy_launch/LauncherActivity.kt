@@ -89,6 +89,7 @@ class LauncherActivity : Activity() {
         super.onTrimMemory(level)
         if (level >= TRIM_MEMORY_UI_HIDDEN) {
             apps = emptyList()
+         
             appAdapter.replaceWith(emptyList())
         }
     }
